@@ -1,0 +1,128 @@
+.location-editor-layer {
+  position: absolute;
+  z-index: 540;
+  top: 84px;
+  right: 16px;
+  bottom: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  pointer-events: none;
+}
+
+.location-editor {
+  position: relative;
+  display: flex;
+  width: min(560px, 100%);
+  max-height: min(680px, 100%);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.location-editor .panel-header {
+  flex: 0 0 auto;
+}
+
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel-header h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.panel-kicker {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.location-form {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.location-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.location-form input,
+.location-form select,
+.location-form textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-ui);
+  outline: none;
+}
+
+.location-form textarea {
+  min-height: 86px;
+  resize: vertical;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.location-form__main-text {
+  min-height: 104px;
+}
+
+.location-form input:focus,
+.location-form select:focus,
+.location-form textarea:focus {
+  border-color: var(--color-primary);
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.panel-muted {
+  margin: 0 0 12px;
+  color: var(--color-muted);
+  line-height: 1.45;
+}
+
+.panel-error {
+  margin: 0 0 12px;
+  color: var(--color-danger);
+  font-weight: 750;
+  line-height: 1.45;
+}

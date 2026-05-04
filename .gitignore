@@ -1,0 +1,34 @@
+# Lokální konfigurace
+.env
+.env.local
+.env.*.local
+
+# Python a testovací/lintovací cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Uživatelská data nahraná aplikací
+uploads/
+
+# Logy
+*.log
+
+# OS soubory
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE a editory
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

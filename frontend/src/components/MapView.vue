@@ -1,0 +1,1048 @@
+<script setup>
+import L from "leaflet";
+import "leaflet.markercluster";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+
+import { searchAddress, suggestAddresses } from "../api/geocoding";
+import copyPopupIconUrl from "../assets/popup/copy.svg";
+import deletePopupIconUrl from "../assets/popup/delete.svg";
+import editPopupIconUrl from "../assets/popup/edit.svg";
+import { formatDecimalCoordinates, parseCoordinates } from "../utils/coordinates";
+import { locationIconHtml } from "../utils/locationIcons";
+import {
+  accessibilityOptions,
+  categoryOptions,
+  ratingOptions,
+  statusOptions,
+  subcategoryOptions,
+} from "../utils/locationStructure";
+
+const props = defineProps({
+  locations: {
+    type: Array,
+    default: () => [],
+  },
+  selectedLocationId: {
+    type: Number,
+    default: null,
+  },
+  draftLocation: {
+    type: Object,
+    default: null,
+  },
+  baseLayer: {
+    type: String,
+    default: "osm",
+  },
+});
+
+const emit = defineEmits([
+  "select-location",
+  "create-location",
+  "toggle-favorite",
+  "edit-location",
+  "delete-location",
+  "upload-photo",
+  "delete-photo",
+  "location-popup-open-change",
+]);
+
+const statusLabels = optionLabelMap(statusOptions);
+const categoryLabels = optionLabelMap(categoryOptions);
+const subcategoryLabels = optionLabelMap(subcategoryOptions);
+const ratingLabels = optionLabelMap(ratingOptions);
+const accessibilityLabels = optionLabelMap(accessibilityOptions);
+
+const mapElement = ref(null);
+const activeBaseLayer = ref("");
+const searchQuery = ref("");
+const searchStatus = ref("idle");
+const searchError = ref("");
+const searchResults = ref([]);
+let map = null;
+let osmLayer = null;
+let googleSatelliteLayer = null;
+let markersLayer = null;
+let draftMarkersLayer = null;
+let searchResultLayer = null;
+let actionPopup = null;
+let markersWereFit = false;
+let markersByLocationId = new Map();
+let photoIndexesByLocationId = new Map();
+let openPopupLocationId = null;
+let isRenderingMarkers = false;
+let searchRequestVersion = 0;
+let searchSuggestTimer = null;
+let suppressSuggestionsForValue = "";
+
+onMounted(() => {
+  map = L.map(mapElement.value, {
+    zoomControl: false,
+  }).setView([49.8175, 15.473], 7);
+
+  osmLayer = createOpenStreetMapLayer();
+  googleSatelliteLayer = createGoogleSatelliteLayer();
+  selectBaseLayer(props.baseLayer);
+
+  L.control.zoom({ position: "bottomright" }).addTo(map);
+  map.on("contextmenu", handleMapContextMenu);
+  markersLayer = L.markerClusterGroup({
+    disableClusteringAtZoom: 14,
+  }).addTo(map);
+  draftMarkersLayer = L.layerGroup().addTo(map);
+  searchResultLayer = L.layerGroup().addTo(map);
+  renderMarkers();
+});
+
+onBeforeUnmount(() => {
+  emit("location-popup-open-change", false);
+  clearSearchSuggestTimer();
+  if (map) {
+    map.remove();
+    map = null;
+  }
+});
+
+watch(
+  () => [props.locations, props.draftLocation],
+  () => {
+    renderMarkers();
+  },
+  { deep: true },
+);
+
+watch(
+  () => props.selectedLocationId,
+  () => {
+    updateMarkerSelection();
+  },
+);
+
+watch(
+  () => props.baseLayer,
+  (layerKey) => {
+    selectBaseLayer(layerKey);
+  },
+);
+
+watch(searchQuery, (value) => {
+  scheduleAddressSuggestions(value);
+});
+
+function renderMarkers() {
+  if (!map || !markersLayer || !draftMarkersLayer) {
+    return;
+  }
+
+  const locationIdToReopen = openPopupLocationId;
+  isRenderingMarkers = true;
+  markersLayer.clearLayers();
+  draftMarkersLayer.clearLayers();
+  markersByLocationId = new Map();
+  const bounds = [];
+
+  props.locations.forEach((location) => {
+    const marker = L.marker([location.latitude, location.longitude], {
+      bubblingMouseEvents: false,
+      icon: markerIcon(location, location.id === props.selectedLocationId),
+      title: location.title,
+    });
+    marker.on("click", () => emit("select-location", location.id));
+    marker.bindPopup(locationPopupContent(location), {
+      className: "location-popup",
+      autoPan: false,
+      autoPanPaddingBottomRight: [16, 96],
+      autoPanPaddingTopLeft: [16, 92],
+      closeButton: false,
+      closeOnClick: false,
+      keepInView: false,
+      minWidth: 240,
+      maxWidth: 380,
+    });
+    marker.on("popupopen", () => {
+      openPopupLocationId = location.id;
+      emit("location-popup-open-change", true);
+      bindLocationPopup(marker, location);
+      scheduleLocationPopupReposition(marker, true);
+    });
+    marker.on("popupclose", () => {
+      if (!isRenderingMarkers && openPopupLocationId === location.id) {
+        openPopupLocationId = null;
+        emit("location-popup-open-change", false);
+      }
+    });
+    marker.addTo(markersLayer);
+    markersByLocationId.set(location.id, { marker, location });
+    bounds.push([location.latitude, location.longitude]);
+  });
+
+  isRenderingMarkers = false;
+
+  if (props.draftLocation) {
+    L.marker([props.draftLocation.latitude, props.draftLocation.longitude], {
+      icon: draftMarkerIcon(),
+      interactive: false,
+    }).addTo(draftMarkersLayer);
+  }
+
+  if (!markersWereFit && bounds.length > 0) {
+    map.fitBounds(bounds, {
+      maxZoom: 13,
+      padding: [32, 32],
+    });
+    markersWereFit = true;
+  }
+
+  if (locationIdToReopen !== null) {
+    const markerToReopen = markersByLocationId.get(locationIdToReopen)?.marker;
+    if (markerToReopen) {
+      markerToReopen.openPopup();
+    } else if (openPopupLocationId === locationIdToReopen) {
+      openPopupLocationId = null;
+    }
+  }
+}
+
+function updateMarkerSelection() {
+  markersByLocationId.forEach(({ marker, location }) => {
+    marker.setIcon(markerIcon(location, location.id === props.selectedLocationId));
+  });
+}
+
+function createOpenStreetMapLayer() {
+  return L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  });
+}
+
+function createGoogleSatelliteLayer() {
+  return L.tileLayer("https://{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", {
+    maxZoom: 20,
+    subdomains: ["mt0", "mt1", "mt2", "mt3"],
+    attribution: "&copy; Google",
+  });
+}
+
+function selectBaseLayer(layerKey) {
+  const normalizedLayerKey = layerKey === "googleSatellite" ? "googleSatellite" : "osm";
+  if (!map || activeBaseLayer.value === normalizedLayerKey) {
+    return;
+  }
+
+  if (normalizedLayerKey === "osm") {
+    switchBaseLayer(osmLayer, "osm");
+    return;
+  }
+
+  if (normalizedLayerKey === "googleSatellite") {
+    switchBaseLayer(googleSatelliteLayer, "googleSatellite");
+    return;
+  }
+}
+
+function switchBaseLayer(layer, layerKey) {
+  if (!map || !layer) {
+    return;
+  }
+
+  [osmLayer, googleSatelliteLayer].forEach((baseLayer) => {
+    if (baseLayer && map.hasLayer(baseLayer)) {
+      map.removeLayer(baseLayer);
+    }
+  });
+
+  layer.addTo(map);
+  activeBaseLayer.value = layerKey;
+}
+
+async function handleSearchSubmit() {
+  const query = searchQuery.value.trim();
+  searchError.value = "";
+  searchResults.value = [];
+  clearSearchSuggestTimer();
+
+  if (!query) {
+    searchError.value = "Zadej adresu nebo GPS souřadnice.";
+    return;
+  }
+
+  const coordinates = parseCoordinates(query);
+  if (coordinates) {
+    searchStatus.value = "ready";
+    focusSearchResult({
+      id: "coordinates",
+      display_name: formatDecimalCoordinates(coordinates.latitude, coordinates.longitude),
+      latitude: coordinates.latitude,
+      longitude: coordinates.longitude,
+    });
+    return;
+  }
+
+  const requestVersion = ++searchRequestVersion;
+  searchStatus.value = "loading";
+  try {
+    const payload = await searchAddress(query);
+    if (requestVersion !== searchRequestVersion) {
+      return;
+    }
+
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    searchResults.value = results;
+    if (results.length === 0) {
+      searchError.value = "Nic jsem nenašel. Zkus upřesnit adresu.";
+      clearSearchMarker();
+      return;
+    }
+
+    focusSearchResult(results[0]);
+  } catch (error) {
+    if (requestVersion === searchRequestVersion) {
+      searchError.value = error.message || "Vyhledávání se nepodařilo.";
+    }
+  } finally {
+    if (requestVersion === searchRequestVersion) {
+      searchStatus.value = "ready";
+    }
+  }
+}
+
+function selectSearchResult(result) {
+  suppressSuggestionsForValue = result.display_name;
+  focusSearchResult(result);
+  searchQuery.value = result.display_name;
+  searchResults.value = [];
+  searchError.value = "";
+}
+
+function clearSearch() {
+  ++searchRequestVersion;
+  clearSearchSuggestTimer();
+  searchQuery.value = "";
+  searchError.value = "";
+  searchResults.value = [];
+  searchStatus.value = "idle";
+  clearSearchMarker();
+}
+
+function scheduleAddressSuggestions(value) {
+  clearSearchSuggestTimer();
+  searchError.value = "";
+
+  const query = value.trim();
+  if (query === suppressSuggestionsForValue) {
+    suppressSuggestionsForValue = "";
+    searchStatus.value = "ready";
+    searchResults.value = [];
+    return;
+  }
+
+  if (query.length < 3) {
+    ++searchRequestVersion;
+    searchResults.value = [];
+    searchStatus.value = "idle";
+    return;
+  }
+
+  if (parseCoordinates(query)) {
+    ++searchRequestVersion;
+    searchResults.value = [];
+    searchStatus.value = "ready";
+    return;
+  }
+
+  const requestVersion = ++searchRequestVersion;
+  searchStatus.value = "loading";
+  searchSuggestTimer = window.setTimeout(() => {
+    loadAddressSuggestions(query, requestVersion);
+  }, 450);
+}
+
+async function loadAddressSuggestions(query, requestVersion) {
+  try {
+    const payload = await suggestAddresses(query);
+    if (requestVersion !== searchRequestVersion) {
+      return;
+    }
+
+    searchResults.value = Array.isArray(payload.results) ? payload.results : [];
+  } catch (error) {
+    if (requestVersion === searchRequestVersion) {
+      searchResults.value = [];
+      searchError.value = error.message || "Našeptávání se nepodařilo.";
+    }
+  } finally {
+    if (requestVersion === searchRequestVersion) {
+      searchStatus.value = "ready";
+    }
+  }
+}
+
+function clearSearchSuggestTimer() {
+  if (searchSuggestTimer !== null) {
+    window.clearTimeout(searchSuggestTimer);
+    searchSuggestTimer = null;
+  }
+}
+
+function focusSearchResult(result) {
+  if (!map || !searchResultLayer) {
+    return;
+  }
+
+  const latitude = Number(result.latitude);
+  const longitude = Number(result.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    searchError.value = "Vyhledaný výsledek nemá platné souřadnice.";
+    return;
+  }
+
+  clearSearchMarker();
+  map.closePopup();
+
+  const latLng = L.latLng(latitude, longitude);
+  const marker = L.marker(latLng, {
+    icon: searchMarkerIcon(),
+    title: result.display_name,
+    zIndexOffset: 1200,
+  });
+
+  marker.bindPopup(searchPopupContent(result), {
+    className: "search-result-popup",
+    closeButton: true,
+    maxWidth: 300,
+    closeOnClick: false,
+  });
+  marker.addTo(searchResultLayer).openPopup();
+
+  const bounds = searchResultBounds(result);
+  if (bounds?.isValid()) {
+    map.fitBounds(bounds, {
+      maxZoom: 17,
+      padding: [64, 64],
+    });
+    return;
+  }
+
+  map.setView(latLng, Math.max(map.getZoom(), 16), {
+    animate: true,
+  });
+}
+
+function clearSearchMarker() {
+  searchResultLayer?.clearLayers();
+}
+
+function searchResultBounds(result) {
+  const boundingBox = result?.bounding_box;
+  if (!boundingBox) {
+    return null;
+  }
+
+  const south = Number(boundingBox.south);
+  const west = Number(boundingBox.west);
+  const north = Number(boundingBox.north);
+  const east = Number(boundingBox.east);
+  if (![south, west, north, east].every(Number.isFinite)) {
+    return null;
+  }
+
+  return L.latLngBounds([
+    [south, west],
+    [north, east],
+  ]);
+}
+
+function searchPopupContent(result) {
+  return `
+    <div class="search-result-popup__content">
+      <strong>${escapeHtml(result.display_name)}</strong>
+      <span>${formatCoordinates(result)}</span>
+    </div>
+  `;
+}
+
+function handleMapContextMenu(event) {
+  openActionPopup(event.latlng);
+}
+
+function openActionPopup(latlng) {
+  if (!map) {
+    return;
+  }
+
+  const coordinates = {
+    latitude: latlng.lat,
+    longitude: latlng.lng,
+  };
+  const formattedCoordinates = formatCoordinates(coordinates);
+  actionPopup = L.popup({
+    className: "map-action-popup",
+    closeButton: true,
+    minWidth: 220,
+    maxWidth: 260,
+  })
+    .setLatLng(latlng)
+    .setContent(`
+      <div class="map-action-popup__content">
+        <strong class="map-action-popup__title">Vyber akci:</strong>
+        <button class="map-action-popup__button" type="button" data-action="copy">Zkopíruj souřadnice</button>
+        <button class="map-action-popup__button" type="button" data-action="mapycz">Otevři v Mapách.cz</button>
+        <button class="map-action-popup__button" type="button" data-action="google">Otevři v Google Maps</button>
+        <button class="map-action-popup__button map-action-popup__button--primary" type="button" data-action="create">Přidej lokaci</button>
+      </div>
+    `)
+    .openOn(map);
+
+  bindActionPopup(coordinates, formattedCoordinates);
+}
+
+function bindActionPopup(coordinates, formattedCoordinates) {
+  const element = actionPopup?.getElement();
+  if (!element) {
+    return;
+  }
+
+  L.DomEvent.disableClickPropagation(element);
+
+  element.querySelector('[data-action="copy"]')?.addEventListener("click", async (event) => {
+    await copyCoordinates(formattedCoordinates);
+    event.currentTarget.textContent = "Zkopírováno";
+  });
+
+  element.querySelector('[data-action="mapycz"]')?.addEventListener("click", () => {
+    window.open(
+      `https://mapy.cz/zakladni?x=${coordinates.longitude}&y=${coordinates.latitude}&z=17`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  element.querySelector('[data-action="google"]')?.addEventListener("click", () => {
+    window.open(
+      `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
+  element.querySelector('[data-action="create"]')?.addEventListener("click", () => {
+    map.closePopup(actionPopup);
+    emit("create-location", coordinates);
+  });
+}
+
+async function copyCoordinates(coordinates) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(coordinates);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = coordinates;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  document.body.removeChild(input);
+}
+
+function formatCoordinates(coordinates) {
+  return `${Number(coordinates.latitude).toFixed(6)}, ${Number(coordinates.longitude).toFixed(6)}`;
+}
+
+function locationPopupContent(location) {
+  const isFavorite = Boolean(location.is_favorite);
+  const favoriteLabel = isFavorite ? "Odebrat z oblíbených" : "Přidat do oblíbených";
+
+  return `
+    <div class="location-popup__content">
+      <div class="location-popup__topbar">
+        <button
+          class="location-popup__icon-action location-popup__favorite${isFavorite ? " location-popup__favorite--active" : ""}"
+          type="button"
+          data-action="favorite"
+          aria-label="${escapeHtml(favoriteLabel)}"
+          title="${escapeHtml(favoriteLabel)}"
+        >
+          <span aria-hidden="true">${isFavorite ? "★" : "☆"}</span>
+        </button>
+        <div class="location-popup__category">
+          <span>Kategorie</span>
+          <strong>${escapeHtml(labelFor(categoryLabels, location.category))}</strong>
+        </div>
+        <button
+          class="location-popup__icon-action location-popup__close"
+          type="button"
+          data-action="close"
+          aria-label="Zavřít popup"
+          title="Zavřít popup"
+        >×</button>
+      </div>
+      <section class="location-popup__summary">
+        <span class="location-popup__kicker">Popis lokace</span>
+        <strong class="location-popup__title">${escapeHtml(location.title)}</strong>
+      </section>
+      <dl class="location-popup__attributes">
+        ${locationAttribute("Typ", subcategoryShortLabel(location.subcategory))}
+        ${locationAttribute("Stav", labelFor(statusLabels, location.status))}
+        ${locationAttribute("Hodnocení", labelFor(ratingLabels, location.rating))}
+        ${locationAttribute("Přístupnost", labelFor(accessibilityLabels, location.accessibility))}
+      </dl>
+      <div class="location-popup__dates">
+        ${dateCard("Přidáno", location.created_at)}
+        ${dateCard("Upraveno", location.updated_at)}
+      </div>
+      ${photoGallery(location)}
+      <div class="location-popup__actions">
+        ${popupActionButton("edit", editPopupIconUrl, "Upravit", "Upravit lokaci")}
+        ${popupActionButton("copy", copyPopupIconUrl, "GPS", "Zkopírovat GPS")}
+        ${popupActionButton("delete", deletePopupIconUrl, "Smazat", "Smazat lokaci")}
+      </div>
+    </div>
+  `;
+}
+
+function bindLocationPopup(marker, location) {
+  const element = marker.getPopup()?.getElement();
+  if (!element) {
+    return;
+  }
+
+  L.DomEvent.disableClickPropagation(element);
+  L.DomEvent.disableScrollPropagation(element);
+
+  bindPopupButton(element, "copy", async (event) => {
+    await copyCoordinates(formatCoordinates(location));
+    const label = event.currentTarget.querySelector(".location-popup__action-label");
+    if (label) {
+      label.textContent = "Zkopírováno";
+      return;
+    }
+    event.currentTarget.textContent = "Zkopírováno";
+  });
+
+  bindPopupButton(element, "favorite", (event) => {
+    event.currentTarget.disabled = true;
+    emit("toggle-favorite", {
+      locationId: location.id,
+      isFavorite: !location.is_favorite,
+    });
+  });
+
+  bindPopupButton(element, "close", () => {
+    map?.closePopup(marker.getPopup());
+  });
+
+  bindPopupButton(element, "edit", () => {
+    map?.closePopup(marker.getPopup());
+    emit("edit-location", location.id);
+  });
+
+  bindPopupButton(element, "delete", (event) => {
+    event.currentTarget.disabled = true;
+    map?.closePopup(marker.getPopup());
+    emit("delete-location", location.id);
+  });
+
+  bindPopupButton(element, "previous-photo", () => {
+    movePhotoIndex(location, -1);
+    refreshLocationPopup(marker, location);
+  });
+
+  bindPopupButton(element, "next-photo", () => {
+    movePhotoIndex(location, 1);
+    refreshLocationPopup(marker, location);
+  });
+
+  const uploadInput = element.querySelector('[data-action="upload-photo"]');
+  if (uploadInput) {
+    uploadInput.onchange = (event) => {
+      const file = event.currentTarget.files?.[0];
+      if (file) {
+        emit("upload-photo", {
+          locationId: location.id,
+          file,
+        });
+      }
+      event.currentTarget.value = "";
+    };
+  }
+
+  element.querySelectorAll('[data-action="delete-photo"]').forEach((button) => {
+    button.onclick = (event) => {
+      emit("delete-photo", {
+        locationId: location.id,
+        photoId: Number(event.currentTarget.dataset.photoId),
+      });
+    };
+  });
+}
+
+function refreshLocationPopup(marker, location) {
+  const popup = marker.getPopup();
+  if (!popup) {
+    return;
+  }
+
+  const scrollContainer = popup.getElement()?.querySelector('.leaflet-popup-content');
+  const scrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
+  popup.setContent(locationPopupContent(location));
+  popup.update();
+  bindLocationPopup(marker, location);
+
+  const newScrollContainer = popup.getElement()?.querySelector('.leaflet-popup-content');
+  if (newScrollContainer) {
+    newScrollContainer.scrollTop = scrollTop;
+  }
+
+  scheduleLocationPopupReposition(marker, false);
+}
+
+function scheduleLocationPopupReposition(marker, animate = false) {
+  window.requestAnimationFrame(() => {
+    repositionLocationPopup(marker, animate);
+    window.requestAnimationFrame(() => repositionLocationPopup(marker, false));
+  });
+}
+
+function repositionLocationPopup(marker, animate = false) {
+  const popup = marker.getPopup();
+  const popupElement = popup?.getElement();
+  if (!map || !popup?.isOpen() || !popupElement) {
+    return;
+  }
+
+  const safeFrame = getLocationPopupSafeFrame();
+  const mapRect = map.getContainer().getBoundingClientRect();
+  const availableBottom = Math.max(safeFrame.top + 1, safeFrame.bottom - safeFrame.bottomReserve);
+  const availableHeight = Math.max(1, availableBottom - safeFrame.top);
+  popupElement.style.setProperty("--location-popup-wrapper-max-height", `${Math.max(180, availableHeight)}px`);
+  popupElement.style.setProperty("--location-popup-content-max-height", `${Math.max(150, availableHeight - 34)}px`);
+  const popupRect = popupElement.getBoundingClientRect();
+  if (!popupRect.width || !popupRect.height) {
+    return;
+  }
+
+  const minLeft = safeFrame.left;
+  const maxLeft = Math.max(minLeft, safeFrame.right - popupRect.width);
+  const centeredLeft = safeFrame.left + (safeFrame.width - popupRect.width) / 2;
+  const desiredLeft = Math.max(minLeft, Math.min(maxLeft, centeredLeft));
+  const centeredTop = safeFrame.top + Math.max(0, (availableHeight - popupRect.height) / 2);
+  const desiredTop = Math.max(
+    safeFrame.top,
+    Math.min(Math.max(safeFrame.top, availableBottom - popupRect.height), safeFrame.isMobile ? safeFrame.top : centeredTop),
+  );
+  const currentMarkerPoint = map.latLngToContainerPoint(marker.getLatLng());
+  const currentPopupPoint = L.point(popupRect.left - mapRect.left, popupRect.top - mapRect.top);
+  const desiredPopupPoint = L.point(desiredLeft - mapRect.left, desiredTop - mapRect.top);
+  const delta = desiredPopupPoint.subtract(currentPopupPoint);
+
+  if (Math.abs(delta.x) < 1 && Math.abs(delta.y) < 1) {
+    return;
+  }
+
+  const zoom = map.getZoom();
+  const markerProjectedPoint = map.project(marker.getLatLng(), zoom);
+  const targetMarkerPoint = currentMarkerPoint.add(delta);
+  const targetCenterPoint = markerProjectedPoint.subtract(targetMarkerPoint).add(map.getSize().divideBy(2));
+
+  map.panTo(map.unproject(targetCenterPoint, zoom), {
+    animate,
+    duration: animate ? 0.18 : 0,
+    easeLinearity: 0.2,
+    noMoveStart: true,
+  });
+}
+
+function getLocationPopupSafeFrame() {
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const isMobile = isMobileViewport();
+  const edgePadding = isMobile ? 10 : 16;
+  const mapRect = map?.getContainer().getBoundingClientRect();
+  let left = Math.max(edgePadding, Math.ceil(mapRect?.left || 0) + edgePadding);
+  let right = Math.min(viewportWidth - edgePadding, Math.floor(mapRect?.right || viewportWidth) - edgePadding);
+  let top = Math.max(edgePadding, Math.ceil(mapRect?.top || 0) + edgePadding);
+  let bottom = Math.min(viewportHeight - edgePadding, Math.floor(mapRect?.bottom || viewportHeight) - edgePadding);
+
+  [".topbar", ".map-search"].forEach((selector) => {
+    const blockingRect = document.querySelector(selector)?.getBoundingClientRect();
+    if (
+      blockingRect &&
+      blockingRect.bottom > 0 &&
+      blockingRect.top < viewportHeight &&
+      blockingRect.right > left &&
+      blockingRect.left < right
+    ) {
+      top = Math.max(top, Math.ceil(blockingRect.bottom + (isMobile ? 10 : 16)));
+    }
+  });
+
+  if (right <= left + 80) {
+    left = edgePadding;
+    right = viewportWidth - edgePadding;
+  }
+
+  if (bottom <= top + 120) {
+    top = edgePadding;
+    bottom = viewportHeight - edgePadding;
+  }
+
+  return {
+    isMobile,
+    left,
+    top,
+    right,
+    bottom,
+    width: Math.max(150, right - left),
+    height: Math.max(160, bottom - top),
+    bottomReserve: isMobile ? Math.max(72, Math.round(viewportHeight * 0.1)) : 42,
+  };
+}
+
+function movePhotoIndex(location, direction) {
+  const photos = Array.isArray(location.photos) ? location.photos : [];
+  if (photos.length < 2) {
+    return;
+  }
+
+  const currentIndex = currentPhotoIndex(location);
+  const nextIndex = (currentIndex + direction + photos.length) % photos.length;
+  photoIndexesByLocationId.set(location.id, nextIndex);
+}
+
+function bindPopupButton(element, action, handler) {
+  const button = element.querySelector(`[data-action="${action}"]`);
+  if (button) {
+    button.onclick = handler;
+  }
+}
+
+function locationAttribute(label, value) {
+  return `
+    <div>
+      <dt>${escapeHtml(label)}</dt>
+      <dd>${escapeHtml(value)}</dd>
+    </div>
+  `;
+}
+
+function dateCard(label, value) {
+  return `
+    <section class="location-popup__date-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(formatPopupDate(value))}</strong>
+    </section>
+  `;
+}
+
+function formatPopupDate(value) {
+  if (!value) {
+    return "Neuvedeno";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Neuvedeno";
+  }
+
+  return new Intl.DateTimeFormat("cs-CZ", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function popupActionButton(action, iconUrl, label, title) {
+  return `
+    <button
+      class="location-popup__action location-popup__action--${escapeHtml(action)}"
+      type="button"
+      data-action="${escapeHtml(action)}"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+    >
+      <img class="location-popup__action-icon" src="${escapeHtml(iconUrl)}" alt="" aria-hidden="true" />
+      <span class="location-popup__action-label">${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function photoGallery(location) {
+  const photos = Array.isArray(location.photos) ? location.photos : [];
+  const photoIndex = currentPhotoIndex(location);
+  const currentPhoto = photos[photoIndex];
+  const galleryContent = currentPhoto
+    ? photoItem(currentPhoto, photoIndex, photos.length)
+    : '<p class="location-popup__photos-empty">Bez fotek</p>';
+
+  return `
+    <section class="location-popup__photos" aria-label="Fotodokumentace">
+      <div class="location-popup__photos-header">
+        <span>Fotky</span>
+        <span>${photos.length > 0 ? `${photoIndex + 1} / ${photos.length}` : "0"}</span>
+      </div>
+      <div class="location-popup__photo-carousel">
+        ${galleryContent}
+      </div>
+      <label class="location-popup__upload">
+        Nahrát fotku
+        <input type="file" accept="image/*" data-action="upload-photo" />
+      </label>
+    </section>
+  `;
+}
+
+function photoItem(photo, photoIndex, photoCount) {
+  const disabledAttribute = photoCount < 2 ? "disabled" : "";
+  return `
+    <figure class="location-popup__photo">
+      <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.original_filename)}" loading="lazy" />
+      <button
+        class="location-popup__photo-nav location-popup__photo-nav--previous"
+        type="button"
+        data-action="previous-photo"
+        title="Předchozí fotka"
+        ${disabledAttribute}
+      ></button>
+      <button
+        class="location-popup__photo-nav location-popup__photo-nav--next"
+        type="button"
+        data-action="next-photo"
+        title="Další fotka"
+        ${disabledAttribute}
+      ></button>
+      <button
+        class="location-popup__photo-delete"
+        type="button"
+        data-action="delete-photo"
+        data-photo-id="${photo.id}"
+        title="Smazat fotku"
+      >×</button>
+    </figure>
+  `;
+}
+
+function currentPhotoIndex(location) {
+  const photos = Array.isArray(location.photos) ? location.photos : [];
+  if (photos.length === 0) {
+    photoIndexesByLocationId.delete(location.id);
+    return 0;
+  }
+
+  const storedIndex = photoIndexesByLocationId.get(location.id) ?? 0;
+  const normalizedIndex = Math.min(Math.max(storedIndex, 0), photos.length - 1);
+  photoIndexesByLocationId.set(location.id, normalizedIndex);
+  return normalizedIndex;
+}
+
+function optionLabelMap(options) {
+  return new Map(options.map((option) => [option.value, option.label]));
+}
+
+function labelFor(labelMap, value) {
+  return labelMap.get(value) || "Neuvedeno";
+}
+
+function subcategoryShortLabel(value) {
+  const label = labelFor(subcategoryLabels, value);
+  const separatorIndex = label.indexOf(": ");
+  return separatorIndex === -1 ? label : label.slice(separatorIndex + 2);
+}
+
+function markerIcon(location, isSelected) {
+  return L.divIcon({
+    className: `location-marker location-marker--custom${isSelected ? " location-marker--selected" : ""}${
+      location.is_favorite ? " location-marker--favorite" : ""
+    }`,
+    html: locationIconHtml(location),
+    iconSize: [46, 46],
+    iconAnchor: [23, 23],
+  });
+}
+
+function draftMarkerIcon() {
+  return L.divIcon({
+    className: "location-marker location-marker--draft",
+    html: '<span class="location-marker__dot"></span>',
+    iconSize: [28, 28],
+    iconAnchor: [14, 14],
+  });
+}
+
+function searchMarkerIcon() {
+  return L.divIcon({
+    className: "search-result-marker",
+    html: '<span class="search-result-marker__pin"></span>',
+    iconSize: [34, 34],
+    iconAnchor: [17, 17],
+  });
+}
+
+function isMobileViewport() {
+  return typeof window !== "undefined" && window.matchMedia("(max-width: 640px)").matches;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+</script>
+
+<template>
+  <section class="map-stage" aria-label="Mapa evidovaných lokalit">
+    <div ref="mapElement" class="map-view"></div>
+    <form
+      class="map-search"
+      role="search"
+      aria-label="Vyhledat místo v mapě"
+      @submit.prevent="handleSearchSubmit"
+      @click.stop
+      @dblclick.stop
+      @mousedown.stop
+      @touchstart.stop
+    >
+      <label class="visually-hidden" for="map-search-input">Adresa nebo GPS souřadnice</label>
+      <div class="map-search__row">
+        <input
+          id="map-search-input"
+          v-model="searchQuery"
+          class="map-search__input"
+          type="text"
+          inputmode="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Adresa nebo GPS"
+          :aria-expanded="searchResults.length > 0"
+          aria-controls="map-search-results"
+          @keydown.esc="searchResults = []"
+        />
+        <button v-if="searchQuery" class="map-search__clear" type="button" title="Vymazat hledání" @click="clearSearch">
+          ×
+        </button>
+        <button class="map-search__submit" type="submit" :disabled="searchStatus === 'loading' || !searchQuery.trim()">
+          {{ searchStatus === "loading" ? "Hledám..." : "Hledat" }}
+        </button>
+      </div>
+      <p v-if="searchError" class="map-search__message map-search__message--error">{{ searchError }}</p>
+      <ul v-if="searchResults.length > 0" id="map-search-results" class="map-search__results">
+        <li v-for="result in searchResults" :key="result.id">
+          <button type="button" class="map-search__result" @click="selectSearchResult(result)">
+            <span>{{ result.display_name }}</span>
+            <small>{{ formatCoordinates(result) }}</small>
+          </button>
+        </li>
+      </ul>
+    </form>
+  </section>
+</template>
