@@ -163,14 +163,8 @@
     padding-right: 2px;
   }
 
-  .location-popup__photo-carousel,
-  .location-popup__photos-empty,
-  .location-popup__photo {
-    min-height: 148px;
-  }
-
-  .location-popup__photo img {
-    height: clamp(138px, 30dvh, 196px);
+  .location-popup__photos {
+    --location-popup-photo-height: clamp(138px, 30dvh, 196px);
   }
 
   .location-filters,
