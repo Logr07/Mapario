@@ -22,6 +22,10 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  filters: {
+    type: Object,
+    default: () => ({}),
+  },
   selectedLocationId: {
     type: Number,
     default: null,
@@ -67,13 +71,17 @@ let markersLayer = null;
 let draftMarkersLayer = null;
 let searchResultLayer = null;
 let actionPopup = null;
+let draftMarker = null;
 let markersWereFit = false;
 let markersByLocationId = new Map();
+let visibleMarkerIds = new Set();
 let photoIndexesByLocationId = new Map();
 let openPopupLocationId = null;
-let isRenderingMarkers = false;
+let selectedMarkerLocationId = null;
 let searchRequestVersion = 0;
 let searchSuggestTimer = null;
+let filterUpdateTimer = null;
+let filterAnimationFrame = null;
 let mapToastTimer = null;
 let suppressSuggestionsForValue = "";
 
@@ -90,16 +98,21 @@ onMounted(() => {
   map.on("contextmenu", handleMapContextMenu);
   markersLayer = L.markerClusterGroup({
     animate: false,
+    chunkDelay: 30,
+    chunkedLoading: true,
+    chunkInterval: 100,
     disableClusteringAtZoom: 14,
   }).addTo(map);
   draftMarkersLayer = L.layerGroup().addTo(map);
   searchResultLayer = L.layerGroup().addTo(map);
-  renderMarkers();
+  syncMarkerCache();
+  syncDraftMarker();
 });
 
 onBeforeUnmount(() => {
   emit("location-popup-open-change", false);
   clearSearchSuggestTimer();
+  clearFilterUpdateTimer();
   clearMapToastTimer();
   if (map) {
     map.remove();
@@ -108,9 +121,24 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => [props.locations, props.draftLocation],
+  () => props.locations,
   () => {
-    renderMarkers();
+    syncMarkerCache();
+  },
+);
+
+watch(
+  () => props.draftLocation,
+  () => {
+    syncDraftMarker();
+  },
+  { deep: true },
+);
+
+watch(
+  () => props.filters,
+  () => {
+    scheduleFilterUpdate();
   },
   { deep: true },
 );
@@ -133,60 +161,45 @@ watch(searchQuery, (value) => {
   scheduleAddressSuggestions(value);
 });
 
-function renderMarkers() {
-  if (!map || !markersLayer || !draftMarkersLayer) {
+function syncMarkerCache() {
+  if (!map || !markersLayer) {
     return;
   }
 
-  const locationIdToReopen = openPopupLocationId;
-  isRenderingMarkers = true;
-  markersLayer.clearLayers();
-  draftMarkersLayer.clearLayers();
-  markersByLocationId = new Map();
+  const nextLocationIds = new Set();
   const bounds = [];
 
   props.locations.forEach((location) => {
-    const marker = L.marker([location.latitude, location.longitude], {
-      bubblingMouseEvents: false,
-      icon: markerIcon(location, location.id === props.selectedLocationId),
-      title: location.title,
-    });
-    marker.on("click", () => emit("select-location", location.id));
-    marker.bindPopup(locationPopupContent(location), {
-      className: "location-popup",
-      autoPan: false,
-      autoPanPaddingBottomRight: [16, 96],
-      autoPanPaddingTopLeft: [16, 92],
-      closeButton: false,
-      closeOnClick: false,
-      keepInView: false,
-      minWidth: 240,
-      maxWidth: 380,
-    });
-    marker.on("popupopen", () => {
-      openPopupLocationId = location.id;
-      emit("location-popup-open-change", true);
-      bindLocationPopup(marker, location);
-      scheduleLocationPopupReposition(marker, true);
-    });
-    marker.on("popupclose", () => {
-      if (!isRenderingMarkers && openPopupLocationId === location.id) {
-        openPopupLocationId = null;
-        emit("location-popup-open-change", false);
-      }
-    });
-    marker.addTo(markersLayer);
-    markersByLocationId.set(location.id, { marker, location });
+    nextLocationIds.add(location.id);
     bounds.push([location.latitude, location.longitude]);
+
+    const existingEntry = markersByLocationId.get(location.id);
+    if (existingEntry) {
+      updateMarkerEntry(existingEntry, location);
+      return;
+    }
+
+    markersByLocationId.set(location.id, createMarkerEntry(location));
   });
 
-  isRenderingMarkers = false;
+  const removedMarkers = [];
+  markersByLocationId.forEach((entry, locationId) => {
+    if (nextLocationIds.has(locationId)) {
+      return;
+    }
 
-  if (props.draftLocation) {
-    L.marker([props.draftLocation.latitude, props.draftLocation.longitude], {
-      icon: draftMarkerIcon(),
-      interactive: false,
-    }).addTo(draftMarkersLayer);
+    if (openPopupLocationId === locationId) {
+      closeLocationPopup(entry);
+    }
+    if (entry.visible) {
+      removedMarkers.push(entry.marker);
+      visibleMarkerIds.delete(locationId);
+    }
+    markersByLocationId.delete(locationId);
+  });
+
+  if (removedMarkers.length > 0) {
+    markersLayer.removeLayers(removedMarkers);
   }
 
   if (!markersWereFit && bounds.length > 0) {
@@ -197,19 +210,255 @@ function renderMarkers() {
     markersWereFit = true;
   }
 
-  if (locationIdToReopen !== null) {
-    const markerToReopen = markersByLocationId.get(locationIdToReopen)?.marker;
-    if (markerToReopen) {
-      markerToReopen.openPopup();
-    } else if (openPopupLocationId === locationIdToReopen) {
+  if (openPopupLocationId !== null && !markersByLocationId.has(openPopupLocationId)) {
+    openPopupLocationId = null;
+  }
+
+  scheduleFilterUpdate();
+}
+
+function updateMarkerSelection() {
+  const markerIdsToUpdate = new Set([selectedMarkerLocationId, props.selectedLocationId]);
+  selectedMarkerLocationId = props.selectedLocationId;
+
+  markerIdsToUpdate.forEach((locationId) => {
+    if (locationId === null || locationId === undefined) {
+      return;
+    }
+    const entry = markersByLocationId.get(locationId);
+    if (entry) {
+      entry.marker.setIcon(markerIcon(entry.location, entry.location.id === props.selectedLocationId));
+    }
+  });
+}
+
+function createMarkerEntry(location) {
+  const marker = L.marker([location.latitude, location.longitude], {
+    bubblingMouseEvents: false,
+    icon: markerIcon(location, location.id === props.selectedLocationId),
+    title: location.title,
+  });
+  const entry = {
+    marker,
+    location,
+    filterCache: filterCacheForLocation(location),
+    visible: false,
+  };
+
+  marker.on("click", () => emit("select-location", entry.location.id));
+  marker.on("popupopen", () => {
+    openPopupLocationId = entry.location.id;
+    emit("location-popup-open-change", true);
+    bindLocationPopup(marker, entry.location);
+    scheduleLocationPopupReposition(marker, true);
+  });
+  marker.on("popupclose", () => {
+    if (openPopupLocationId === entry.location.id) {
       openPopupLocationId = null;
+      emit("location-popup-open-change", false);
+    }
+  });
+  bindMarkerPopup(marker, location);
+
+  return entry;
+}
+
+function updateMarkerEntry(entry, location) {
+  const previousLocation = entry.location;
+  entry.location = location;
+  entry.filterCache = filterCacheForLocation(location);
+
+  if (previousLocation.latitude !== location.latitude || previousLocation.longitude !== location.longitude) {
+    entry.marker.setLatLng([location.latitude, location.longitude]);
+  }
+
+  if (previousLocation.title !== location.title) {
+    entry.marker.options.title = location.title;
+  }
+
+  if (markerVisualKey(previousLocation) !== markerVisualKey(location) || location.id === props.selectedLocationId) {
+    entry.marker.setIcon(markerIcon(location, location.id === props.selectedLocationId));
+  }
+
+  if (locationPopupDataKey(previousLocation) !== locationPopupDataKey(location)) {
+    const wasPopupOpen = entry.marker.getPopup()?.isOpen();
+    bindMarkerPopup(entry.marker, location);
+    if (wasPopupOpen) {
+      entry.marker.openPopup();
+      bindLocationPopup(entry.marker, location);
+      entry.marker.getPopup()?.update();
     }
   }
 }
 
-function updateMarkerSelection() {
-  markersByLocationId.forEach(({ marker, location }) => {
-    marker.setIcon(markerIcon(location, location.id === props.selectedLocationId));
+function bindMarkerPopup(marker, location) {
+  marker.bindPopup(locationPopupContent(location), {
+    className: "location-popup",
+    autoPan: false,
+    autoPanPaddingBottomRight: [16, 96],
+    autoPanPaddingTopLeft: [16, 92],
+    closeButton: false,
+    closeOnClick: false,
+    keepInView: false,
+    minWidth: 240,
+    maxWidth: 380,
+  });
+}
+
+function syncDraftMarker() {
+  if (!draftMarkersLayer) {
+    return;
+  }
+
+  if (!props.draftLocation) {
+    if (draftMarker) {
+      draftMarkersLayer.removeLayer(draftMarker);
+      draftMarker = null;
+    }
+    return;
+  }
+
+  const latLng = [props.draftLocation.latitude, props.draftLocation.longitude];
+  if (draftMarker) {
+    draftMarker.setLatLng(latLng);
+    return;
+  }
+
+  draftMarker = L.marker(latLng, {
+    icon: draftMarkerIcon(),
+    interactive: false,
+  }).addTo(draftMarkersLayer);
+}
+
+function scheduleFilterUpdate() {
+  if (!markersLayer) {
+    return;
+  }
+
+  clearFilterUpdateTimer();
+  filterUpdateTimer = window.setTimeout(() => {
+    filterUpdateTimer = null;
+    filterAnimationFrame = window.requestAnimationFrame(() => {
+      filterAnimationFrame = null;
+      applyMarkerFilters();
+    });
+  }, 80);
+}
+
+function clearFilterUpdateTimer() {
+  if (filterUpdateTimer !== null) {
+    window.clearTimeout(filterUpdateTimer);
+    filterUpdateTimer = null;
+  }
+  if (filterAnimationFrame !== null) {
+    window.cancelAnimationFrame(filterAnimationFrame);
+    filterAnimationFrame = null;
+  }
+}
+
+function applyMarkerFilters() {
+  if (!markersLayer) {
+    return;
+  }
+
+  const filterState = collectFilterState();
+  const markersToAdd = [];
+  const markersToRemove = [];
+
+  markersByLocationId.forEach((entry, locationId) => {
+    const shouldBeVisible = matchesFilter(entry.filterCache, filterState);
+
+    if (shouldBeVisible && !entry.visible) {
+      markersToAdd.push(entry.marker);
+      entry.visible = true;
+      visibleMarkerIds.add(locationId);
+      return;
+    }
+
+    if (!shouldBeVisible && entry.visible) {
+      if (openPopupLocationId === locationId) {
+        closeLocationPopup(entry);
+      }
+      markersToRemove.push(entry.marker);
+      entry.visible = false;
+      visibleMarkerIds.delete(locationId);
+    }
+  });
+
+  if (markersToRemove.length > 0) {
+    markersLayer.removeLayers(markersToRemove);
+  }
+  if (markersToAdd.length > 0) {
+    markersLayer.addLayers(markersToAdd);
+  }
+}
+
+function closeLocationPopup(entry) {
+  const popup = entry.marker.getPopup();
+  if (popup?.isOpen()) {
+    map?.closePopup(popup);
+  }
+}
+
+function collectFilterState() {
+  return {
+    accessibilities: selectedFilterSet("accessibilities", accessibilityOptions.map((option) => option.value)),
+    favorites: selectedFilterSet("favorites", ["favorite", "regular"]),
+    ratings: selectedFilterSet("ratings", ratingOptions.map((option) => option.value)),
+    statuses: selectedFilterSet("statuses", statusOptions.map((option) => option.value)),
+    subcategories: selectedFilterSet("subcategories", subcategoryOptions.map((option) => option.value)),
+  };
+}
+
+function selectedFilterSet(key, fallbackValues) {
+  const values = props.filters?.[key];
+  return new Set(Array.isArray(values) ? values : fallbackValues);
+}
+
+function filterCacheForLocation(location) {
+  return {
+    accessibility: location.accessibility,
+    favoriteState: location.is_favorite ? "favorite" : "regular",
+    rating: location.rating,
+    status: location.status,
+    subcategory: location.subcategory,
+  };
+}
+
+function matchesFilter(filterCache, filterState) {
+  return (
+    filterState.statuses.has(filterCache.status) &&
+    filterState.favorites.has(filterCache.favoriteState) &&
+    filterState.subcategories.has(filterCache.subcategory) &&
+    filterState.ratings.has(filterCache.rating) &&
+    filterState.accessibilities.has(filterCache.accessibility)
+  );
+}
+
+function markerVisualKey(location) {
+  return [
+    location.status,
+    location.rating,
+    location.subcategory,
+    location.is_favorite ? "favorite" : "regular",
+  ].join("|");
+}
+
+function locationPopupDataKey(location) {
+  return JSON.stringify({
+    accessibility: location.accessibility,
+    category: location.category,
+    created_at: location.created_at,
+    id: location.id,
+    is_favorite: location.is_favorite,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    photos: normalizePopupPhotos(location).map((photo) => `${photo.id}:${photo.url}`).join(","),
+    rating: location.rating,
+    status: location.status,
+    subcategory: location.subcategory,
+    title: location.title,
+    updated_at: location.updated_at,
   });
 }
 

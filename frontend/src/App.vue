@@ -62,16 +62,18 @@ const activeFilterCount = computed(
     filters.accessibilities.length,
 );
 
-const filteredLocations = computed(() =>
-  locations.value.filter(
-    (location) =>
-      matchesSelected(filters.statuses, location.status) &&
-      matchesSelected(filters.favorites, location.is_favorite ? "favorite" : "regular") &&
-      matchesSelected(filters.subcategories, location.subcategory) &&
-      matchesSelected(filters.ratings, location.rating) &&
-      matchesSelected(filters.accessibilities, location.accessibility),
-  ),
-);
+const filterSets = computed(() => ({
+  accessibilities: new Set(filters.accessibilities),
+  favorites: new Set(filters.favorites),
+  ratings: new Set(filters.ratings),
+  statuses: new Set(filters.statuses),
+  subcategories: new Set(filters.subcategories),
+}));
+
+const filteredLocations = computed(() => {
+  const selected = filterSets.value;
+  return locations.value.filter((location) => locationMatchesFilters(location, selected));
+});
 
 onMounted(async () => {
   await Promise.all([checkApiHealth(), loadCurrentUser()]);
@@ -382,8 +384,14 @@ function normalizeFilterValues(values) {
   return Array.isArray(values) ? [...values] : [];
 }
 
-function matchesSelected(selectedValues, actualValue) {
-  return selectedValues.includes(actualValue);
+function locationMatchesFilters(location, selected) {
+  return (
+    selected.statuses.has(location.status) &&
+    selected.favorites.has(location.is_favorite ? "favorite" : "regular") &&
+    selected.subcategories.has(location.subcategory) &&
+    selected.ratings.has(location.rating) &&
+    selected.accessibilities.has(location.accessibility)
+  );
 }
 </script>
 
@@ -418,7 +426,8 @@ function matchesSelected(selectedValues, actualValue) {
     </header>
     <div v-if="currentUser" class="map-workspace">
       <MapView
-        :locations="filteredLocations"
+        :locations="locations"
+        :filters="filters"
         :selected-location-id="selectedLocationId"
         :draft-location="editorMode === 'create' ? editorLocation : null"
         :base-layer="selectedBaseLayer"
