@@ -57,6 +57,24 @@
   overflow-y: auto;
   padding-right: 4px;
   overscroll-behavior: contain;
+  scrollbar-color: var(--color-border) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.location-form::-webkit-scrollbar {
+  width: 10px;
+}
+
+.location-form::-webkit-scrollbar-track {
+  background: none;
+}
+
+.location-form::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
 }
 
 .location-form label {
