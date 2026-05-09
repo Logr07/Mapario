@@ -554,7 +554,8 @@ function formatCoordinates(coordinates) {
 }
 
 function locationPopupContent(location) {
-  const isFavorite = Boolean(location.is_favorite);
+  const popupLocation = normalizePopupLocation(location);
+  const isFavorite = popupLocation.is_favorite;
   const favoriteLabel = isFavorite ? "Odebrat z oblíbených" : "Přidat do oblíbených";
 
   return `
@@ -571,7 +572,7 @@ function locationPopupContent(location) {
         </button>
         <div class="location-popup__category">
           <span>Kategorie</span>
-          <strong>${escapeHtml(labelFor(categoryLabels, location.category))}</strong>
+          <strong>${escapeHtml(labelFor(categoryLabels, popupLocation.category))}</strong>
         </div>
         <button
           class="location-popup__icon-action location-popup__close"
@@ -583,19 +584,19 @@ function locationPopupContent(location) {
       </div>
       <section class="location-popup__summary">
         <span class="location-popup__kicker">Popis lokace</span>
-        <strong class="location-popup__title">${escapeHtml(location.title)}</strong>
+        <strong class="location-popup__title">${escapeHtml(popupLocation.title)}</strong>
       </section>
       <dl class="location-popup__attributes">
-        ${locationAttribute("Typ", subcategoryShortLabel(location.subcategory))}
-        ${locationAttribute("Stav", labelFor(statusLabels, location.status))}
-        ${locationAttribute("Hodnocení", labelFor(ratingLabels, location.rating))}
-        ${locationAttribute("Přístupnost", labelFor(accessibilityLabels, location.accessibility))}
+        ${locationAttribute("Typ", subcategoryShortLabel(popupLocation.subcategory))}
+        ${locationAttribute("Stav", labelFor(statusLabels, popupLocation.status))}
+        ${locationAttribute("Hodnocení", labelFor(ratingLabels, popupLocation.rating))}
+        ${locationAttribute("Přístupnost", labelFor(accessibilityLabels, popupLocation.accessibility))}
       </dl>
       <div class="location-popup__dates">
-        ${dateCard("Přidáno", location.created_at)}
-        ${dateCard("Upraveno", location.updated_at)}
+        ${dateCard("Přidáno", popupLocation.created_at)}
+        ${dateCard("Upraveno", popupLocation.updated_at)}
       </div>
-      ${photoGallery(location)}
+      ${photoGallery(popupLocation)}
       <div class="location-popup__actions">
         ${popupActionButton("edit", editPopupIconUrl, "Upravit", "Upravit lokaci")}
         ${popupActionButton("copy", copyPopupIconUrl, "GPS", "Zkopírovat GPS")}
@@ -679,6 +680,8 @@ function bindLocationPopup(marker, location) {
       });
     };
   });
+
+  bindPopupPhotoLoadErrors(element, marker, location);
 }
 
 function refreshLocationPopup(marker, location) {
@@ -805,12 +808,12 @@ function getLocationPopupSafeFrame() {
 }
 
 function movePhotoIndex(location, direction) {
-  const photos = Array.isArray(location.photos) ? location.photos : [];
+  const photos = normalizePopupPhotos(location);
   if (photos.length < 2) {
     return;
   }
 
-  const currentIndex = currentPhotoIndex(location);
+  const currentIndex = currentPhotoIndexForPhotos(location.id, photos);
   const nextIndex = (currentIndex + direction + photos.length) % photos.length;
   photoIndexesByLocationId.set(location.id, nextIndex);
 }
@@ -875,22 +878,24 @@ function popupActionButton(action, iconUrl, label, title) {
 }
 
 function photoGallery(location) {
-  const photos = Array.isArray(location.photos) ? location.photos : [];
-  const photoIndex = currentPhotoIndex(location);
+  const photos = normalizePopupPhotos(location);
+  const photoIndex = currentPhotoIndexForPhotos(location.id, photos);
   const currentPhoto = photos[photoIndex];
   const galleryContent = currentPhoto
-    ? photoItem(currentPhoto, photoIndex, photos.length)
+    ? `
+      <div class="location-popup__photo-carousel">
+        ${photoItem(currentPhoto, photoIndex, photos.length)}
+      </div>
+    `
     : '<p class="location-popup__photos-empty">Bez fotek</p>';
 
   return `
-    <section class="location-popup__photos" aria-label="Fotodokumentace">
+    <section class="location-popup__photos${currentPhoto ? "" : " location-popup__photos--empty"}" aria-label="Fotodokumentace">
       <div class="location-popup__photos-header">
         <span>Fotky</span>
         <span>${photos.length > 0 ? `${photoIndex + 1} / ${photos.length}` : "0"}</span>
       </div>
-      <div class="location-popup__photo-carousel">
-        ${galleryContent}
-      </div>
+      ${galleryContent}
       <label class="location-popup__upload">
         Nahrát fotku
         <input type="file" accept="image/*" data-action="upload-photo" />
@@ -903,7 +908,12 @@ function photoItem(photo, photoIndex, photoCount) {
   const disabledAttribute = photoCount < 2 ? "disabled" : "";
   return `
     <figure class="location-popup__photo">
-      <img src="${escapeHtml(photo.url)}" alt="${escapeHtml(photo.original_filename)}" loading="lazy" />
+      <img
+        src="${escapeHtml(photo.url)}"
+        alt="${escapeHtml(photo.original_filename)}"
+        loading="lazy"
+        data-photo-id="${escapeHtml(photo.id)}"
+      />
       <button
         class="location-popup__photo-nav location-popup__photo-nav--previous"
         type="button"
@@ -922,24 +932,128 @@ function photoItem(photo, photoIndex, photoCount) {
         class="location-popup__photo-delete"
         type="button"
         data-action="delete-photo"
-        data-photo-id="${photo.id}"
+        data-photo-id="${escapeHtml(photo.id)}"
         title="Smazat fotku"
       >×</button>
     </figure>
   `;
 }
 
-function currentPhotoIndex(location) {
-  const photos = Array.isArray(location.photos) ? location.photos : [];
+function currentPhotoIndexForPhotos(locationId, photos) {
   if (photos.length === 0) {
-    photoIndexesByLocationId.delete(location.id);
+    photoIndexesByLocationId.delete(locationId);
     return 0;
   }
 
-  const storedIndex = photoIndexesByLocationId.get(location.id) ?? 0;
+  const storedIndex = photoIndexesByLocationId.get(locationId) ?? 0;
   const normalizedIndex = Math.min(Math.max(storedIndex, 0), photos.length - 1);
-  photoIndexesByLocationId.set(location.id, normalizedIndex);
+  photoIndexesByLocationId.set(locationId, normalizedIndex);
   return normalizedIndex;
+}
+
+function bindPopupPhotoLoadErrors(element, marker, location) {
+  element.querySelectorAll(".location-popup__photo img[data-photo-id]").forEach((image) => {
+    const photoId = Number(image.dataset.photoId);
+    const showFallback = () => showBrokenPhotoFallback(image, marker, location.id, photoId);
+    image.onerror = showFallback;
+
+    if (image.complete && image.naturalWidth === 0) {
+      showFallback();
+    }
+  });
+}
+
+function showBrokenPhotoFallback(image, marker, locationId, photoId) {
+  const carousel = image.closest(".location-popup__photo-carousel");
+  if (!carousel || carousel.classList.contains("location-popup__photo-carousel--compact")) {
+    return;
+  }
+
+  const deleteButton = Number.isFinite(photoId)
+    ? `
+      <button
+        class="location-popup__photo-unavailable-delete"
+        type="button"
+        data-action="delete-photo"
+        data-photo-id="${escapeHtml(photoId)}"
+      >Smazat záznam</button>
+    `
+    : "";
+
+  carousel.classList.add("location-popup__photo-carousel--compact");
+  carousel.innerHTML = `
+    <div class="location-popup__photo-unavailable">
+      <span>Fotku se nepodařilo načíst.</span>
+      ${deleteButton}
+    </div>
+  `;
+
+  carousel.querySelector('[data-action="delete-photo"]')?.addEventListener("click", () => {
+    emit("delete-photo", { locationId, photoId });
+  });
+
+  scheduleLocationPopupReposition(marker, false);
+}
+
+function normalizePopupLocation(location) {
+  return {
+    ...location,
+    title: normalizePopupText(location?.title),
+    category: normalizePopupValue(location?.category),
+    subcategory: normalizePopupValue(location?.subcategory),
+    status: normalizePopupValue(location?.status),
+    rating: normalizePopupValue(location?.rating),
+    accessibility: normalizePopupValue(location?.accessibility),
+    created_at: location?.created_at,
+    updated_at: location?.updated_at,
+    is_favorite: Boolean(location?.is_favorite),
+    photos: normalizePopupPhotos(location),
+  };
+}
+
+function normalizePopupPhotos(location) {
+  if (!Array.isArray(location?.photos)) {
+    return [];
+  }
+
+  return location.photos.reduce((photos, photo) => {
+    if (!photo || typeof photo !== "object") {
+      return photos;
+    }
+
+    const photoId = normalizePopupPhotoId(photo.id);
+    const url = normalizePopupUrl(photo.url);
+    if (photoId === null || !url) {
+      return photos;
+    }
+
+    photos.push({
+      ...photo,
+      id: photoId,
+      url,
+      original_filename: normalizePopupText(photo.original_filename, "Fotka"),
+    });
+    return photos;
+  }, []);
+}
+
+function normalizePopupPhotoId(value) {
+  const photoId = Number(value);
+  return Number.isInteger(photoId) && photoId > 0 ? photoId : null;
+}
+
+function normalizePopupUrl(value) {
+  const url = normalizePopupValue(value);
+  return url && url !== "null" && url !== "undefined" ? url : "";
+}
+
+function normalizePopupText(value, fallback = "Neuvedeno") {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+}
+
+function normalizePopupValue(value) {
+  return String(value ?? "").trim();
 }
 
 function optionLabelMap(options) {
