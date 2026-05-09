@@ -114,6 +114,14 @@
     max-height: min(270px, calc(100dvh - 176px));
   }
 
+  .map-toast {
+    right: 10px;
+    bottom: 82px;
+    left: 10px;
+    max-width: none;
+    text-align: center;
+  }
+
   .location-filters {
     z-index: 590;
     top: 74px;

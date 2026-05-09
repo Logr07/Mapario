@@ -59,6 +59,7 @@ const searchQuery = ref("");
 const searchStatus = ref("idle");
 const searchError = ref("");
 const searchResults = ref([]);
+const mapToast = ref(null);
 let map = null;
 let osmLayer = null;
 let googleSatelliteLayer = null;
@@ -73,6 +74,7 @@ let openPopupLocationId = null;
 let isRenderingMarkers = false;
 let searchRequestVersion = 0;
 let searchSuggestTimer = null;
+let mapToastTimer = null;
 let suppressSuggestionsForValue = "";
 
 onMounted(() => {
@@ -97,6 +99,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   emit("location-popup-open-change", false);
   clearSearchSuggestTimer();
+  clearMapToastTimer();
   if (map) {
     map.remove();
     map = null;
@@ -506,8 +509,19 @@ function bindActionPopup(coordinates, formattedCoordinates) {
   L.DomEvent.disableClickPropagation(element);
 
   element.querySelector('[data-action="copy"]')?.addEventListener("click", async (event) => {
-    await copyCoordinates(formattedCoordinates);
-    event.currentTarget.textContent = "Zkopírováno";
+    const button = event.currentTarget;
+    button.disabled = true;
+    const copied = await copyCoordinates(formattedCoordinates);
+
+    if (copied) {
+      map?.closePopup(actionPopup);
+      actionPopup = null;
+      showMapToast("Souřadnice zkopírovány.");
+      return;
+    }
+
+    button.disabled = false;
+    showMapToast("Souřadnice se nepodařilo zkopírovat.", "error");
   });
 
   element.querySelector('[data-action="mapycz"]')?.addEventListener("click", () => {
@@ -533,20 +547,43 @@ function bindActionPopup(coordinates, formattedCoordinates) {
 }
 
 async function copyCoordinates(coordinates) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(coordinates);
-    return;
-  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(coordinates);
+      return true;
+    }
 
-  const input = document.createElement("textarea");
-  input.value = coordinates;
-  input.setAttribute("readonly", "");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand("copy");
-  document.body.removeChild(input);
+    const input = document.createElement("textarea");
+    try {
+      input.value = coordinates;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      return document.execCommand("copy");
+    } finally {
+      input.remove();
+    }
+  } catch {
+    return false;
+  }
+}
+
+function showMapToast(message, type = "success") {
+  clearMapToastTimer();
+  mapToast.value = { message, type };
+  mapToastTimer = window.setTimeout(() => {
+    mapToast.value = null;
+    mapToastTimer = null;
+  }, 2500);
+}
+
+function clearMapToastTimer() {
+  if (mapToastTimer) {
+    window.clearTimeout(mapToastTimer);
+    mapToastTimer = null;
+  }
 }
 
 function formatCoordinates(coordinates) {
@@ -616,13 +653,14 @@ function bindLocationPopup(marker, location) {
   L.DomEvent.disableScrollPropagation(element);
 
   bindPopupButton(element, "copy", async (event) => {
-    await copyCoordinates(formatCoordinates(location));
+    const copied = await copyCoordinates(formatCoordinates(location));
     const label = event.currentTarget.querySelector(".location-popup__action-label");
+    const labelText = copied ? "Zkopírováno" : "Chyba";
     if (label) {
-      label.textContent = "Zkopírováno";
+      label.textContent = labelText;
       return;
     }
-    event.currentTarget.textContent = "Zkopírováno";
+    event.currentTarget.textContent = labelText;
   });
 
   bindPopupButton(element, "favorite", (event) => {
@@ -1116,6 +1154,15 @@ function escapeHtml(value) {
 <template>
   <section class="map-stage" aria-label="Mapa evidovaných lokalit">
     <div ref="mapElement" class="map-view"></div>
+    <p
+      v-if="mapToast"
+      class="map-toast"
+      :class="`map-toast--${mapToast.type}`"
+      role="status"
+      aria-live="polite"
+    >
+      {{ mapToast.message }}
+    </p>
     <form
       class="map-search"
       role="search"
