@@ -67,10 +67,6 @@ watch(
 function submitForm() {
   localError.value = "";
 
-  if (!form.title.trim()) {
-    localError.value = "Popis lokace je povinný.";
-    return;
-  }
   const coordinates = parseCoordinates(form.coordinates);
   if (!coordinates) {
     localError.value = "Souřadnice nejsou v podporovaném formátu.";
@@ -111,8 +107,8 @@ function handleCategoryChange() {
       <p v-if="localError || error" class="panel-error">{{ localError || error }}</p>
 
       <label>
-        Popis
-        <textarea v-model="form.title" class="location-form__main-text" rows="3" maxlength="180" wrap="soft" required></textarea>
+        Popis (nepovinné)
+        <textarea v-model="form.title" class="location-form__main-text" rows="3" maxlength="180" wrap="soft"></textarea>
       </label>
 
       <label>

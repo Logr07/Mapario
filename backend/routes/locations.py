@@ -134,8 +134,6 @@ def _validated_location_payload() -> dict:
         raise LocationValidationError("Pošli data lokace ve formátu JSON.")
 
     title = str(payload.get("title", "")).strip()
-    if not title:
-        raise LocationValidationError("Popis lokace je povinný.")
     if len(title) > 180:
         raise LocationValidationError("Popis lokace je příliš dlouhý.")
 

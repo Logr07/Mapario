@@ -104,12 +104,25 @@ def test_locations_api_validates_payload(client):
 
     response = client.post(
         "/api/locations",
-        json=location_payload(title="", latitude=120),
+        json=location_payload(latitude=120),
         headers=csrf_headers(client),
     )
 
     assert response.status_code == 400
     assert "error" in response.get_json()
+
+
+def test_locations_api_allows_empty_title(client):
+    register(client)
+
+    response = client.post(
+        "/api/locations",
+        json=location_payload(title="   "),
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["location"]["title"] == ""
 
 
 def test_locations_api_updates_and_deletes_location(client):
