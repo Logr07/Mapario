@@ -251,7 +251,7 @@
 }
 
 .location-marker {
-  position: relative;
+  position: absolute;
   display: block;
 }
 

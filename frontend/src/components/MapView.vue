@@ -89,6 +89,7 @@ onMounted(() => {
   L.control.zoom({ position: "bottomright" }).addTo(map);
   map.on("contextmenu", handleMapContextMenu);
   markersLayer = L.markerClusterGroup({
+    animate: false,
     disableClusteringAtZoom: 14,
   }).addTo(map);
   draftMarkersLayer = L.layerGroup().addTo(map);
