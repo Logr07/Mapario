@@ -1,6 +1,7 @@
 <script setup>
 import { reactive, ref } from "vue";
 import { changePassword } from "../api/auth";
+import PasswordField from "./PasswordField.vue";
 
 const emit = defineEmits(["close"]);
 
@@ -54,37 +55,34 @@ async function submit() {
       </div>
       
       <form v-else class="modal-form" @submit.prevent="submit">
-        <label class="input-group">
-          <span class="input-label">Současné heslo</span>
-          <input
-            v-model="form.oldPassword"
-            type="password"
-            required
-            :disabled="isSubmitting"
-          />
-        </label>
+        <PasswordField
+          id="change-password-current"
+          v-model="form.oldPassword"
+          label="Současné heslo"
+          autocomplete="current-password"
+          :disabled="isSubmitting"
+          required
+        />
         
-        <label class="input-group">
-          <span class="input-label">Nové heslo</span>
-          <input
-            v-model="form.newPassword"
-            type="password"
-            required
-            minlength="8"
-            :disabled="isSubmitting"
-          />
-        </label>
+        <PasswordField
+          id="change-password-new"
+          v-model="form.newPassword"
+          label="Nové heslo"
+          autocomplete="new-password"
+          :disabled="isSubmitting"
+          required
+          minlength="8"
+        />
         
-        <label class="input-group">
-          <span class="input-label">Potvrzení nového hesla</span>
-          <input
-            v-model="form.confirmPassword"
-            type="password"
-            required
-            minlength="8"
-            :disabled="isSubmitting"
-          />
-        </label>
+        <PasswordField
+          id="change-password-confirm"
+          v-model="form.confirmPassword"
+          label="Potvrzení nového hesla"
+          autocomplete="new-password"
+          :disabled="isSubmitting"
+          required
+          minlength="8"
+        />
 
         <p v-if="error" class="panel-error">{{ error }}</p>
 
@@ -143,20 +141,21 @@ async function submit() {
   gap: 16px;
 }
 
-.input-group {
+.modal-form :deep(.input-group) {
   display: grid;
   gap: 6px;
 }
 
-.input-label {
+.modal-form :deep(.input-label) {
   font-size: 0.85rem;
   font-weight: 700;
   color: var(--color-muted);
 }
 
-input {
+.modal-form :deep(.password-field__input) {
   width: 100%;
-  padding: 10px 12px;
+  min-height: 40px;
+  padding: 10px 48px 10px 12px;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-ui);
@@ -164,8 +163,13 @@ input {
   outline: none;
 }
 
-input:focus {
+.modal-form :deep(.password-field__input:focus) {
   border-color: var(--color-primary);
+}
+
+.modal-form :deep(.password-field__input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .form-actions {

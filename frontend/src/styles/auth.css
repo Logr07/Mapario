@@ -228,6 +228,14 @@
   cursor: not-allowed;
 }
 
+.auth-form .password-field__input {
+  padding-right: 52px;
+}
+
+.auth-form .password-field__toggle:disabled {
+  cursor: not-allowed;
+}
+
 .auth-panel__error {
   margin: 0;
   padding: 12px 16px;

@@ -1,5 +1,6 @@
 <script setup>
 import { computed, reactive, ref } from "vue";
+import PasswordField from "./PasswordField.vue";
 
 const props = defineProps({
   error: {
@@ -22,7 +23,9 @@ const mode = ref("login");
 const form = reactive({
   email: "",
   password: "",
+  confirmPassword: "",
 });
+const localError = ref("");
 
 const isRegisterMode = computed(() => mode.value === "register");
 const submitLabel = computed(() => {
@@ -33,9 +36,17 @@ const submitLabel = computed(() => {
 });
 const passwordAutocomplete = computed(() => (isRegisterMode.value ? "new-password" : "current-password"));
 const switchLabel = computed(() => (isRegisterMode.value ? "Už mám účet" : "Vytvořit účet"));
+const displayedError = computed(() => localError.value || props.error);
 
 function submit() {
   if (props.isBusy) {
+    return;
+  }
+
+  localError.value = "";
+
+  if (isRegisterMode.value && form.password !== form.confirmPassword) {
+    localError.value = "Hesla se neshodují.";
     return;
   }
 
@@ -57,6 +68,8 @@ function switchMode() {
     return;
   }
 
+  localError.value = "";
+  form.confirmPassword = "";
   mode.value = isRegisterMode.value ? "login" : "register";
 }
 </script>
@@ -121,21 +134,31 @@ function switchMode() {
 
 
 
-          <label class="input-group">
-            <span class="input-label">Heslo</span>
-            <input
-              v-model="form.password"
-              type="password"
-              :autocomplete="passwordAutocomplete"
-              :disabled="isBusy"
-              placeholder="Minimálně 8 znaků"
-              required
-              minlength="8"
-            />
-          </label>
+          <PasswordField
+            id="auth-password"
+            v-model="form.password"
+            label="Heslo"
+            :autocomplete="passwordAutocomplete"
+            :disabled="isBusy"
+            placeholder="Minimálně 8 znaků"
+            required
+            minlength="8"
+          />
+
+          <PasswordField
+            v-if="isRegisterMode"
+            id="auth-confirm-password"
+            v-model="form.confirmPassword"
+            label="Potvrzení hesla"
+            autocomplete="new-password"
+            :disabled="isBusy"
+            placeholder="Zadejte heslo znovu"
+            required
+            minlength="8"
+          />
 
           <transition name="fade">
-            <p v-if="error" class="auth-panel__error">{{ error }}</p>
+            <p v-if="displayedError" class="auth-panel__error">{{ displayedError }}</p>
           </transition>
 
           <div class="auth-actions">
