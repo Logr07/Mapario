@@ -4,6 +4,7 @@ services:
       context: ./database
       dockerfile: Dockerfile
     image: mapa-bakalarka-postgis:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-interest_map}
       POSTGRES_USER: ${POSTGRES_USER:-interest_map}
@@ -23,6 +24,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -42,6 +44,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "127.0.0.1:5173:80"
     depends_on:
