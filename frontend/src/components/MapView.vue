@@ -281,13 +281,13 @@ function updateMarkerEntry(entry, location) {
   }
 
   if (locationPopupDataKey(previousLocation) !== locationPopupDataKey(location)) {
-    const wasPopupOpen = entry.marker.getPopup()?.isOpen();
-    bindMarkerPopup(entry.marker, location);
-    if (wasPopupOpen) {
-      entry.marker.openPopup();
-      bindLocationPopup(entry.marker, location);
-      entry.marker.getPopup()?.update();
+    const popup = entry.marker.getPopup();
+    if (popup?.isOpen()) {
+      refreshLocationPopup(entry.marker, location);
+      return;
     }
+
+    bindMarkerPopup(entry.marker, location);
   }
 }
 
@@ -903,14 +903,18 @@ function bindLocationPopup(marker, location) {
   L.DomEvent.disableScrollPropagation(element);
 
   bindPopupButton(element, "copy", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
     const copied = await copyCoordinates(formatCoordinates(location));
-    const label = event.currentTarget.querySelector(".location-popup__action-label");
-    const labelText = copied ? "Zkopírováno" : "Chyba";
-    if (label) {
-      label.textContent = labelText;
+
+    if (copied) {
+      map?.closePopup(marker.getPopup());
+      showMapToast("Souřadnice zkopírovány.");
       return;
     }
-    event.currentTarget.textContent = labelText;
+
+    button.disabled = false;
+    showMapToast("Souřadnice se nepodařilo zkopírovat.", "error");
   });
 
   bindPopupButton(element, "favorite", (event) => {
